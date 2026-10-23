@@ -1,0 +1,41 @@
+name: Headless C++ DSP tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: ${{ matrix.platform }} / ${{ matrix.edition }}
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-24.04, windows-2025]
+        edition: [modular-4, insert-vst3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (no JUCE)
+        shell: bash
+        run: |
+          if [ "${{ matrix.edition }}" = "modular-4" ]; then
+            cmake -S apps/modular-4 -B build/ci-${{ matrix.edition }} -DSPEECHSHARE_LIVE_BUILD_APP=OFF -DCMAKE_BUILD_TYPE=Release
+          else
+            cmake -S plugins/insert-vst3 -B build/ci-${{ matrix.edition }} -DSPEECHSHARE_BUILD_PLUGINS=OFF -DCMAKE_BUILD_TYPE=Release
+          fi
+
+      - name: Build tests
+        run: cmake --build build/ci-${{ matrix.edition }} --config Release --parallel 2
+
+      - name: Run tests
+        run: ctest --test-dir build/ci-${{ matrix.edition }} -C Release --output-on-failure
+
+# This intentionally does not build the JUCE GUI, driver integration or VST3
+# bundles. A green badge must never be presented as proof of ASIO/Dante stability.

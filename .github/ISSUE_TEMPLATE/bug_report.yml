@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a reproducible DSP, UI, VST3 or routing issue
+labels: [bug]
+body:
+  - type: dropdown
+    id: edition
+    attributes:
+      label: Edition
+      options:
+        - Modular 4 standalone v0.3.1
+        - Insert VST3 v0.1.5
+        - Other / development branch
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the shortest possible routing/configuration needed to reproduce the issue.
+      placeholder: "1. Set ...\n2. Route ...\n3. Observe ..."
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual result
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: OS, DAW/ASIO driver, sample rate and buffer
+      placeholder: Windows 11 / REAPER / DVS / 48000 Hz / 256 samples
+  - type: textarea
+    id: logs
+    attributes:
+      label: Non-sensitive diagnostic data
+      description: Never paste credentials, public/private IP topology, full personal file paths or proprietary broadcast recordings.

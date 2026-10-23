@@ -1,0 +1,841 @@
+desc:SpeechShare - Dugan-style Automixer (32 mic / multitrack)
+// Independent implementation inspired by the Dan Dugan speech gain-sharing principle.
+// Independent / experimental. Not a Waves or Dan Dugan product.
+// 32 mono/stereo microphones in stereo channel pairs.
+// Audio output: stereo pair per microphone (MULTI) or summed stereo (SUM).
+// JSFX requires a REAPER track with 2 * microphone-count channels (max 64).
+
+slider1:0<0,2,1{MULTI - separate stems,SUM - stereo mix,BYPASS - separate}>-Output routing
+slider2:1<0,1,1{Off,On}>-Engine
+slider3:100<10,500,5>-RMS window (ms)
+slider4:1<0.5,3,0.05>-Strength
+slider5:12<1,120,1>-Gain attack (ms)
+slider6:160<10,1500,5>-Gain release (ms)
+slider7:0<0,30,1>-Lookahead (ms)
+slider8:100<0,350,10>-Detector high-pass (Hz)
+slider9:0<0,1,1{Off,On}>-KEY generator master on/off
+slider10:-56<-96,-24,1>-KEY A generator RMS (dBFS)
+slider11:0<0,2,1{Gain,Input,Output}>-Main meter
+slider12:32<1,32,1>-Active microphones maximum
+slider52:0<0,1,1{CLASSIC - original gain-sharing,SMART - dual detector + adaptive floor}>-Algorithm
+// Three virtual KEY channels. Levels are calibrated as generator PRE-detector RMS.
+// Type: 0=pink noise, 1=40 Hz sine, 2=1000 Hz sine.
+slider53:-56<-96,-24,1>-KEY B generator RMS (dBFS)
+slider54:-56<-96,-24,1>-KEY C generator RMS (dBFS)
+slider55:1<0,2,1{Pink noise,Sine 40 Hz,Sine 1000 Hz}>-KEY A generator
+slider56:1<0,2,1{Pink noise,Sine 40 Hz,Sine 1000 Hz}>-KEY B generator
+slider57:1<0,2,1{Pink noise,Sine 40 Hz,Sine 1000 Hz}>-KEY C generator
+slider58:1<0,1,1{Off,On}>-KEY A enabled
+slider59:1<0,1,1{Off,On}>-KEY B enabled
+slider60:1<0,1,1{Off,On}>-KEY C enabled
+
+// 'Weight' controls are calibrated in dB, applied to DETECTION ONLY.
+// The GUI also provides MAN/AUTO/MUTE, BYPASS, group A/B/C and OVERRIDE.
+slider20:0<-24,24,0.5>-Microphone 01 weight (dB)
+slider21:0<-24,24,0.5>-Microphone 02 weight (dB)
+slider22:0<-24,24,0.5>-Microphone 03 weight (dB)
+slider23:0<-24,24,0.5>-Microphone 04 weight (dB)
+slider24:0<-24,24,0.5>-Microphone 05 weight (dB)
+slider25:0<-24,24,0.5>-Microphone 06 weight (dB)
+slider26:0<-24,24,0.5>-Microphone 07 weight (dB)
+slider27:0<-24,24,0.5>-Microphone 08 weight (dB)
+slider28:0<-24,24,0.5>-Microphone 09 weight (dB)
+slider29:0<-24,24,0.5>-Microphone 10 weight (dB)
+slider30:0<-24,24,0.5>-Microphone 11 weight (dB)
+slider31:0<-24,24,0.5>-Microphone 12 weight (dB)
+slider32:0<-24,24,0.5>-Microphone 13 weight (dB)
+slider33:0<-24,24,0.5>-Microphone 14 weight (dB)
+slider34:0<-24,24,0.5>-Microphone 15 weight (dB)
+slider35:0<-24,24,0.5>-Microphone 16 weight (dB)
+slider36:0<-24,24,0.5>-Microphone 17 weight (dB)
+slider37:0<-24,24,0.5>-Microphone 18 weight (dB)
+slider38:0<-24,24,0.5>-Microphone 19 weight (dB)
+slider39:0<-24,24,0.5>-Microphone 20 weight (dB)
+slider40:0<-24,24,0.5>-Microphone 21 weight (dB)
+slider41:0<-24,24,0.5>-Microphone 22 weight (dB)
+slider42:0<-24,24,0.5>-Microphone 23 weight (dB)
+slider43:0<-24,24,0.5>-Microphone 24 weight (dB)
+slider44:0<-24,24,0.5>-Microphone 25 weight (dB)
+slider45:0<-24,24,0.5>-Microphone 26 weight (dB)
+slider46:0<-24,24,0.5>-Microphone 27 weight (dB)
+slider47:0<-24,24,0.5>-Microphone 28 weight (dB)
+slider48:0<-24,24,0.5>-Microphone 29 weight (dB)
+slider49:0<-24,24,0.5>-Microphone 30 weight (dB)
+slider50:0<-24,24,0.5>-Microphone 31 weight (dB)
+slider51:0<-24,24,0.5>-Microphone 32 weight (dB)
+
+options:no_meter want_all_kb
+
+@init
+// Fixed memory map: first 1024 words for state/meters; moving windows follow.
+M_MODE = 0;        // 0=MAN, 1=AUTO, 2=MUTE, 3=BYPASS
+M_GROUP = 32;      // 0=A, 1=B, 2=C
+M_OVERRIDE = 64;
+M_GAIN = 96;
+M_TARGET = 128;
+M_RMS = 160;
+M_POWER_SUM = 192;
+M_SCORE = 224;
+M_DB_INPUT = 256;
+M_DB_OUTPUT = 288;
+M_DB_GAIN = 320;
+M_GROUP_OVERRIDE = 352; // three entries
+M_GROUP_MUTE = 356;
+M_GROUP_SUM = 360;
+M_GROUP_COUNT = 364;
+M_GROUP_GOAL = 368;
+M_GROUP_POWER = 372;
+M_GROUP_NORM = 376;
+M_GROUP_GOAL_SMOOTH = 380;
+M_INPUT_L = 384;
+M_INPUT_R = 416;
+M_HP_X = 512;  // 64 entries; per stereo side
+M_HP_Y = 576;  // 64 entries
+// Extra per-microphone state (all below the existing RMS ring).
+M_FAST_POWER = 640;       // dual-detector fast squared envelope
+M_NOISE_POWER = 672;      // estimated stationary floor per microphone
+M_SMART_ACTIVITY = 704;   // diagnostics; continuous and not a speech classifier
+M_FINAL_GAIN = 736;       // short crossfade on algorithm changes only
+// Each virtual KEY has its own audio-rate generator and detector state.
+M_KEY_PHASE = 800;
+M_KEY_B0 = 804;
+M_KEY_B1 = 808;
+M_KEY_B2 = 812;
+M_KEY_HPX = 816;
+M_KEY_HPY = 820;
+M_KEY_PRE_PWR = 824;
+M_KEY_DET_PWR = 828;
+M_KEY_SCORE = 832;
+M_KEY_DB = 836;
+M_RMS_RING = 2048;
+EPS_AMP = 0.000000000001;
+EPS_SCORE = 0.000000000000000000000000000001;
+EPS_SILENCE = 0.000000000000000000000000001;
+EPS_NORMAL = 0.0000000000000000000001;
+
+state_initialized != 1 ? (
+  i = 0; loop(32,
+    M_MODE[i] = 1;
+    M_GROUP[i] = 0;
+    M_OVERRIDE[i] = 0;
+    M_GAIN[i] = 1;
+    M_TARGET[i] = 1;
+    M_DB_INPUT[i] = -90;
+    M_DB_OUTPUT[i] = -90;
+    M_DB_GAIN[i] = 0;
+    M_FAST_POWER[i] = 0;
+    M_NOISE_POWER[i] = 0;
+    M_SMART_ACTIVITY[i] = 0;
+    M_FINAL_GAIN[i] = 1;
+    i += 1;
+  );
+  memset(M_GROUP_OVERRIDE, 0, 3);
+  memset(M_GROUP_MUTE, 0, 3);
+  memset(M_KEY_PHASE, 0, 3);
+  memset(M_KEY_B0, 0, 3);
+  memset(M_KEY_B1, 0, 3);
+  memset(M_KEY_B2, 0, 3);
+  memset(M_KEY_HPX, 0, 3);
+  memset(M_KEY_HPY, 0, 3);
+  memset(M_KEY_PRE_PWR, 0, 3);
+  memset(M_KEY_DET_PWR, 0, 3);
+  memset(M_KEY_SCORE, 0, 3);
+  memset(M_KEY_DB, -96, 3);
+  M_GROUP_GOAL[0] = 1; M_GROUP_GOAL[1] = 1; M_GROUP_GOAL[2] = 1;
+  M_GROUP_GOAL_SMOOTH[0] = 1; M_GROUP_GOAL_SMOOTH[1] = 1; M_GROUP_GOAL_SMOOTH[2] = 1;
+  state_initialized = 1;
+);
+prev_rms_samples = -1;
+prev_delay_samples = -1;
+window_pos = 0;
+delay_pos = 0;
+hop_pos = 0;
+prev_sr = 0;
+page = 0;
+mouse_was_down = 0;
+drag_kind = 0;
+last_algorithm = slider52;
+algorithm_fade_remaining = 0;
+noise_startup_counter = 0;
+
+@slider
+rms_samples = max(1, floor(srate * slider3 * 0.001 + 0.5));
+delay_samples = max(0, floor(srate * slider7 * 0.001 + 0.5));
+delay_base = M_RMS_RING + 32 * rms_samples + 64;
+
+// Buffer clearing only when lengths change. No resetting on Weight/Strength changes.
+(rms_samples != prev_rms_samples || srate != prev_sr) ? (
+  memset(M_RMS_RING, 0, 32 * rms_samples);
+  memset(M_POWER_SUM, 0, 32);
+  memset(M_RMS, 0, 32);
+  window_pos = 0;
+  prev_rms_samples = rms_samples;
+);
+(delay_samples != prev_delay_samples || srate != prev_sr || rms_samples != previous_delay_rms) ? (
+  delay_samples > 0 ? memset(delay_base, 0, 64 * delay_samples);
+  delay_pos = 0;
+  prev_delay_samples = delay_samples;
+  previous_delay_rms = rms_samples;
+);
+srate != prev_sr ? (
+  memset(M_FAST_POWER, 0, 32);
+  memset(M_NOISE_POWER, 0, 32);
+  memset(M_SMART_ACTIVITY, 0, 32);
+  noise_startup_counter = 0;
+);
+prev_sr = srate;
+
+algorithm_fade_coeff = 1 - exp(-1 / (srate * 0.010));
+slider52 != last_algorithm ? (
+  algorithm_fade_remaining = max(1, floor(srate * 0.050));
+  last_algorithm = slider52;
+);
+
+pdc_delay = delay_samples;
+pdc_bot_ch = 0;
+pdc_top_ch = num_ch;
+
+hp_coeff = slider8 > 0 ? exp(-2 * $pi * slider8 / srate) : 0;
+attack_coeff = exp(-1 / (srate * max(0.001, slider5 * 0.001)));
+release_coeff = exp(-1 / (srate * max(0.001, slider6 * 0.001)));
+// KEY generators are virtual: their audio never reaches spl() output.
+// The displayed level is pre-HPF RMS; output detector energy is post-HPF.
+key_env_alpha = 1 - exp(-1 / (srate * max(0.015, slider3 * 0.001)));
+key_display_alpha = 1 - exp(-1 / (srate * 0.13));
+reference_smooth_rate = 1 - exp(-1 / (srate * 0.045));
+// Fast squared envelope: 9 ms attack, 60 ms release (fixed DSP design).
+fast_rise_alpha = 1 - exp(-1 / (srate * 0.009));
+fast_fall_alpha = 1 - exp(-1 / (srate * 0.060));
+// Noise estimator: 0.35 s toward quieter observations; 8 s toward louder.
+noise_down_alpha = 1 - exp(-64 / (srate * 0.35));
+noise_up_alpha = 1 - exp(-64 / (srate * 8.0));
+// During the first 0.6 s only, learn steady background more rapidly.
+noise_start_alpha = 1 - exp(-64 / (srate * 0.7));
+
+@sample
+// Detect GUI-driven changes even if the host does not call @slider immediately.
+slider52 != last_algorithm ? (
+  algorithm_fade_remaining = max(1, floor(srate * 0.050));
+  last_algorithm = slider52;
+);
+mic_count = min(32, min(floor(num_ch / 2), floor(slider12)));
+mic_count = max(1, mic_count);
+
+// Three independent KEY generator/detector strips, one per automix group.
+// Pink uses a lightweight Paul-Kellet-style pinking filter (approximate).
+// Pink noise level calibrated with a static gain; detector measures the actual
+// post-HPF output so spectral modes influence KEY strength correctly.
+kg=0;
+loop(3,
+  ktype = floor(slider(55+kg));
+  krms_db = kg==0 ? slider10 : slider(52+kg);
+  kamp = 10^(krms_db * 0.05);
+  ktype==0 ? (
+    kwhite = (rand(1)*2-1);
+    M_KEY_B0[kg]=0.99765*M_KEY_B0[kg]+kwhite*0.0990460;
+    M_KEY_B1[kg]=0.96300*M_KEY_B1[kg]+kwhite*0.2965164;
+    M_KEY_B2[kg]=0.57000*M_KEY_B2[kg]+kwhite*1.0526913;
+    // Fixed normalization for the pink filter. Pre RMS is monitored in GUI.
+    ksample=(M_KEY_B0[kg]+M_KEY_B1[kg]+M_KEY_B2[kg]+kwhite*0.1848)*0.583*kamp;
+  ) : (
+    kfreq=ktype==1 ? 40 : 1000;
+    kphase=M_KEY_PHASE[kg]+kfreq/srate;
+    kphase>=1 ? kphase-=floor(kphase);
+    M_KEY_PHASE[kg]=kphase;
+    ksample=sin(2*$pi*kphase)*1.41421356237*kamp;
+  );
+  slider8>0 ? (
+    ky=hp_coeff*(M_KEY_HPY[kg]+ksample-M_KEY_HPX[kg]);
+  ) : ky=ksample;
+  M_KEY_HPX[kg]=ksample;
+  M_KEY_HPY[kg]=ky;
+  M_KEY_PRE_PWR[kg]+=key_display_alpha*(ksample*ksample-M_KEY_PRE_PWR[kg]);
+  M_KEY_DET_PWR[kg]+=key_env_alpha*(ky*ky-M_KEY_DET_PWR[kg]);
+  M_KEY_DB[kg]=max(-96,10*log10(max(EPS_SCORE,M_KEY_DET_PWR[kg])));
+  M_KEY_SCORE[kg]=(slider9>0.5 && slider(58+kg)>0.5) ?
+    max(0,M_KEY_DET_PWR[kg])^slider4 : 0;
+  kg+=1;
+);
+
+// Pass 1: take unprocessed samples and update true sliding-window RMS detectors.
+t = 0;
+loop(mic_count,
+  ch = t * 2;
+  l = spl(ch);
+  r = spl(ch + 1);
+  M_INPUT_L[t] = l;
+  M_INPUT_R[t] = r;
+
+  slider8 > 0 ? (
+    yl = hp_coeff * (M_HP_Y[ch] + l - M_HP_X[ch]);
+    yr = hp_coeff * (M_HP_Y[ch + 1] + r - M_HP_X[ch + 1]);
+    M_HP_X[ch] = l;
+    M_HP_X[ch + 1] = r;
+    M_HP_Y[ch] = yl;
+    M_HP_Y[ch + 1] = yr;
+  ) : (
+    yl = l;
+    yr = r;
+    M_HP_X[ch] = l;
+    M_HP_X[ch + 1] = r;
+    M_HP_Y[ch] = 0;
+    M_HP_Y[ch + 1] = 0;
+  );
+  power = (yl * yl + yr * yr) * 0.5;
+  fast_previous = M_FAST_POWER[t];
+  fast_a = power > fast_previous ? fast_rise_alpha : fast_fall_alpha;
+  M_FAST_POWER[t] = max(0, fast_previous + fast_a * (power - fast_previous));
+  ridx = M_RMS_RING + t * rms_samples + window_pos;
+  old_power = ridx[0];
+  ridx[0] = power;
+  M_POWER_SUM[t] = max(0, M_POWER_SUM[t] + power - old_power);
+  t += 1;
+);
+window_pos += 1;
+window_pos >= rms_samples ? window_pos = 0;
+
+// Every 64 samples: recompute relative gains from weighted RMS power.
+hop_pos += 1;
+hop_pos >= 64 ? (
+  hop_pos = 0;
+  memset(M_GROUP_SUM, 0, 3);
+  memset(M_GROUP_COUNT, 0, 3);
+  noise_startup_counter += 64;
+  t = 0;
+  loop(mic_count,
+    slow_power = max(0, M_POWER_SUM[t] / rms_samples);
+    env = sqrt(slow_power);
+    M_RMS[t] = env;
+    // The floor is learnt on the detector's HP-filtered audio; it is NOT a VAD.
+    // Realtime continuous adaptation and no hard open/closed threshold.
+    noise_old = M_NOISE_POWER[t];
+    noise_old <= 0 ? noise_old = max(0.000000000001,slow_power);
+    noise_a = slow_power < noise_old ? noise_down_alpha :
+              (noise_startup_counter < srate * 0.6 ? noise_start_alpha : noise_up_alpha);
+    M_NOISE_POWER[t] = max(0.000000000001,
+                         noise_old + noise_a * (slow_power - noise_old));
+    M_DB_INPUT[t] = max(-96, 20 * log10(max(env, EPS_AMP)));
+
+    g = floor(M_GROUP[t]);
+    active_auto = slider2 > 0.5 && slider1 != 2 && floor(M_MODE[t]) == 1 &&
+                  M_GROUP_OVERRIDE[g] < 0.5 && M_GROUP_MUTE[g] < 0.5;
+    active_auto ? (
+      slider52 > 0.5 ? (
+        // Fast onset + steady RMS; subtract learned stationary noise energy.
+        // 0.1% of slow POWER survives, so this is not a hard gate.
+        activity_power = max(0,
+           0.65 * slow_power + 0.35 * M_FAST_POWER[t] -
+           1.6 * M_NOISE_POWER[t]);
+        smart_power = activity_power + 0.001 * slow_power;
+        M_SMART_ACTIVITY[t] = smart_power;
+        weighted = sqrt(max(0,smart_power)) * (10 ^ (slider(20+t) * 0.05));
+      ) : (
+        weighted = max(0, env * (10 ^ (slider(20+t) * 0.05)));
+      );
+      score = weighted ^ (2 * slider4);
+      M_SCORE[t] = score;
+      M_GROUP_SUM[g] += score;
+      M_GROUP_COUNT[g] += 1;
+    ) : M_SCORE[t] = 0;
+    t += 1;
+  );
+  // The virtual reference competes but never reaches the audio outputs.
+  g = 0;
+  loop(3,
+    n = M_GROUP_COUNT[g];
+    n > 0 ? (
+      real_sum = M_GROUP_SUM[g];
+      total = real_sum + M_KEY_SCORE[g];
+      M_GROUP_GOAL[g] = M_KEY_SCORE[g] > 0 ? (real_sum / max(total, EPS_SCORE)) : 1;
+      // Exact digital silence without reference: preserve one-mic ambience normalization.
+      (M_KEY_SCORE[g] <= 0 && real_sum < EPS_SILENCE) ? M_GROUP_GOAL[g] = 1;
+    ) : M_GROUP_GOAL[g] = 0;
+    g += 1;
+  );
+  t = 0;
+  loop(mic_count,
+    mode = floor(M_MODE[t]);
+    g = floor(M_GROUP[t]);
+    target = 1;
+    slider2 > 0.5 && slider1 != 2 ? (
+      mode == 3 ? target = 1 : (
+        M_GROUP_MUTE[g] > 0.5 ? target = 0 : (
+          M_GROUP_OVERRIDE[g] > 0.5 ? target = (M_OVERRIDE[t] > 0.5 ? 1 : 0) : (
+            mode == 2 ? target = 0 : (
+              mode == 0 ? target = 1 : (
+                M_GROUP_SUM[g] < EPS_SILENCE && M_KEY_SCORE[g] <= 0 ? (
+                  target = 1 / sqrt(max(1, M_GROUP_COUNT[g]));
+                ) : (
+                  denom = M_GROUP_SUM[g] + M_KEY_SCORE[g];
+                  target = sqrt(M_SCORE[t] / max(denom, EPS_SCORE));
+                );
+              );
+            );
+          );
+        );
+      );
+    );
+    M_TARGET[t] = min(1, max(0, target));
+    t += 1;
+  );
+);
+
+// Pass 2: channel gain transitions (always smooth, including MAN and MUTE).
+memset(M_GROUP_POWER, 0, 3);
+t = 0;
+loop(mic_count,
+  v = M_GAIN[t];
+  target = M_TARGET[t];
+  a = target > v ? attack_coeff : release_coeff;
+  v = target + a * (v - target);
+  M_GAIN[t] = v;
+  g = floor(M_GROUP[t]);
+  active_auto = slider2 > 0.5 && slider1 != 2 && floor(M_MODE[t]) == 1 &&
+                M_GROUP_OVERRIDE[g] < 0.5 && M_GROUP_MUTE[g] < 0.5;
+  active_auto ? M_GROUP_POWER[g] += v * v;
+  t += 1;
+);
+g = 0;
+loop(3,
+  // Smooth energy reference changes so that the normalization itself doesn't click.
+  M_GROUP_GOAL_SMOOTH[g] += (M_GROUP_GOAL[g] - M_GROUP_GOAL_SMOOTH[g]) * reference_smooth_rate;
+  slider52 > 0.5 ? (
+    // SMART: never boost a new mic to cancel its intended attack fade.
+    // Only attenuate transient AUTO-group power that exceeds unity.
+    M_GROUP_NORM[g] = M_GROUP_POWER[g] > 1 ?
+        1 / sqrt(M_GROUP_POWER[g]) : 1;
+  ) : (
+    // CLASSIC preserves the original v1.3 energy-renormalization behavior.
+    M_GROUP_NORM[g] = M_GROUP_POWER[g] > EPS_NORMAL ?
+      sqrt(max(0, M_GROUP_GOAL_SMOOTH[g]) / M_GROUP_POWER[g]) : 1;
+  );
+  g += 1;
+);
+
+// Pass 3: use lookahead delay and leave all microphone pairs separate by default.
+sum_l = 0;
+sum_r = 0;
+t = 0;
+loop(mic_count,
+  ch = t * 2;
+  l = M_INPUT_L[t];
+  r = M_INPUT_R[t];
+  delay_samples > 0 ? (
+    didx = delay_base + ch * delay_samples + delay_pos;
+    dl = didx[0];
+    didx[0] = l;
+    didx += delay_samples;
+    dr = didx[0];
+    didx[0] = r;
+    l = dl;
+    r = dr;
+  );
+
+  gr = M_GAIN[t];
+  g = floor(M_GROUP[t]);
+  active_auto = slider2 > 0.5 && slider1 != 2 && floor(M_MODE[t]) == 1 &&
+                M_GROUP_OVERRIDE[g] < 0.5 && M_GROUP_MUTE[g] < 0.5;
+  active_auto ? gr *= M_GROUP_NORM[g];
+  gr = min(1, max(0, gr));
+  // On live Classic/Smart changes: smooth only for a brief fixed interval.
+  algorithm_fade_remaining > 0 ? (
+    M_FINAL_GAIN[t] += algorithm_fade_coeff * (gr - M_FINAL_GAIN[t]);
+    gr = M_FINAL_GAIN[t];
+  ) : M_FINAL_GAIN[t] = gr;
+  M_DB_GAIN[t] = max(-96, 20 * log10(max(EPS_AMP, gr)));
+  M_DB_OUTPUT[t] = max(-96, M_DB_INPUT[t] + M_DB_GAIN[t]);
+
+  l *= gr;
+  r *= gr;
+  slider1 == 1 ? (
+    sum_l += l;
+    sum_r += r;
+    spl(ch) = 0;
+    spl(ch + 1) = 0;
+  ) : (
+    spl(ch) = l;
+    spl(ch + 1) = r;
+  );
+  t += 1;
+);
+algorithm_fade_remaining > 0 ? algorithm_fade_remaining -= 1;
+slider1 == 1 ? (
+  spl0 = sum_l;
+  spl1 = sum_r;
+);
+delay_samples > 0 ? (
+  delay_pos += 1;
+  delay_pos >= delay_samples ? delay_pos = 0;
+);
+
+@serialize
+// Host saves global and per-mic weight sliders natively; save GUI-only channel state.
+file_mem(0, M_MODE, 32);
+file_mem(0, M_GROUP, 32);
+file_mem(0, M_OVERRIDE, 32);
+file_mem(0, M_GROUP_OVERRIDE, 3);
+file_mem(0, M_GROUP_MUTE, 3);
+
+@gfx 1850 850
+// SpeechShare v1.5 - sharp native-resolution, responsive canvas (1480 x 680).
+// All positions below use logical pixels. Geometry and fonts render at
+// actual device resolution; only mouse input is converted to logical units.
+
+function hit(px,py,x,y,w,h) (px>=x && px<x+w && py>=y && py<y+h;);
+function rect(x,y,w,h) (
+  gfx_rect(ui_ox+x*ui_s,ui_oy+y*ui_s,w*ui_s,h*ui_s);
+);
+function outline(x,y,w,h) (
+  gfx_roundrect(ui_ox+x*ui_s,ui_oy+y*ui_s,w*ui_s,h*ui_s,4*ui_s);
+);
+function line(x,y,xx,yy) (
+  gfx_line(ui_ox+x*ui_s,ui_oy+y*ui_s,ui_ox+xx*ui_s,ui_oy+yy*ui_s);
+);
+function text_at(x,y,txt) (
+  gfx_x=ui_ox+x*ui_s; gfx_y=ui_oy+y*ui_s; gfx_drawstr(txt);
+);
+function text_center(x,y,w,h,txt) local(tw,th) (
+  gfx_measurestr(txt,tw,th);
+  gfx_x=ui_ox+(x+w*0.5)*ui_s-tw*0.5;
+  gfx_y=ui_oy+(y+h*0.5)*ui_s-th*0.5;
+  gfx_drawstr(txt);
+);
+function solid_button(x,y,w,h,txt,on,r,g,b) (
+  on ? gfx_set(r,g,b) : gfx_set(0.16,0.20,0.25);
+  rect(x,y,w,h);
+  gfx_set(0.33,0.42,0.49); outline(x,y,w,h);
+  on ? gfx_set(0.03,0.08,0.10) : gfx_set(0.86,0.91,0.95);
+  gfx_setfont(2);
+  text_center(x,y,w,h,txt);
+);
+function box_field(x,y,w,h,value,id,dec) local(tw,th) (
+  gfx_set(edit_active && edit_id==id ? 0.16:0.09,0.17,0.22); rect(x,y,w,h);
+  gfx_set(edit_active && edit_id==id ? 0.33:0.25,0.59,0.73);outline(x,y,w,h);
+  (edit_active && edit_id==id) ? (
+    strcpy(#vtext,#edit_buf); strcat(#vtext,"|");
+  ) : (
+    dec==2 ? sprintf(#vtext,"%.2f",value) :
+    dec==1 ? sprintf(#vtext,"%.1f",value) : sprintf(#vtext,"%.0f",value);
+  );
+  gfx_set(0.94,0.97,1); gfx_setfont(2);text_center(x,y,w,h,#vtext);
+);
+function set_param(id,v,mn,mx,step) local(q) (
+  q=mn+floor((min(mx,max(mn,v))-mn)/step+0.5)*step;
+  slider(id)=min(mx,max(mn,q));
+  sliderchange(-1);
+);
+function param_data(k) (
+  k==0 ? (pi=3;pmin=10;pmax=500;pstep=5;pdef=100;strcpy(#pname,"RMS  ms");) :
+  k==1 ? (pi=4;pmin=0.5;pmax=3;pstep=0.05;pdef=1;strcpy(#pname,"STRENGTH");) :
+  k==2 ? (pi=5;pmin=1;pmax=120;pstep=1;pdef=12;strcpy(#pname,"ATTACK  ms");) :
+  k==3 ? (pi=6;pmin=10;pmax=1500;pstep=5;pdef=160;strcpy(#pname,"RELEASE  ms");) :
+  k==4 ? (pi=7;pmin=0;pmax=30;pstep=1;pdef=0;strcpy(#pname,"LOOKAHEAD");) :
+          (pi=8;pmin=0;pmax=350;pstep=10;pdef=100;strcpy(#pname,"HPF  Hz"););
+);
+function key_level_id(g) (g==0 ? 10 : 52+g;);
+function do_edit(id,precision) (
+  edit_active=1; edit_id=id; edit_replace=1;
+  precision==2?sprintf(#edit_buf,"%.2f",slider(id)):
+  precision==1?sprintf(#edit_buf,"%.1f",slider(id)):
+              sprintf(#edit_buf,"%.0f",slider(id));
+);
+function finish_edit(commit) local(v,mn,mx,step,k) (
+  commit && match("%f",#edit_buf,v) ? (
+    (edit_id>=20 && edit_id<=51) ? (mn=-24;mx=24;step=0.5;) :
+    (edit_id==10 || edit_id==53 || edit_id==54) ? (mn=-96;mx=-24;step=1;) :
+    edit_id==12 ? (mn=1;mx=32;step=1;) : (
+      mn=0;mx=1;step=1;
+      k=0;loop(6,param_data(k);pi==edit_id?(mn=pmin;mx=pmax;step=pstep;);k+=1;);
+    );
+    set_param(edit_id,v,mn,mx,step);
+  );
+  edit_active=0;edit_id=0;
+);
+function slider_h(x,y,w,h,v,mn,mx) local(f) (
+  gfx_set(0.08,0.12,0.15);rect(x,y,w,h);
+  gfx_set(0.26,0.33,0.38);rect(x+7,y+h*0.5-2,w-14,4);
+  f=min(1,max(0,(v-mn)/max(0.0000001,mx-mn)));
+  gfx_set(0.19,0.71,0.91);rect(x+7,y+h*0.5-2,(w-14)*f,4);
+  gfx_set(0.94,0.96,1);rect(x+3+(w-13)*f,y+3,10,h-6);
+);
+function meter_v(x,y,w,h,db,low,high) local(f) (
+  gfx_set(0.044,0.062,0.083);rect(x,y,w,h);
+  f=min(1,max(0,(db-low)/(high-low)));
+  gfx_set(f>0.88?0.93:0.23,f>0.88?0.65:0.87,f>0.88?0.17:0.46);
+  rect(x+2,y+h-2-h*f,w-4,max(0,h*f-2));
+);
+function ref_cut(g) local(ratio,db) (
+  ratio=max(0.000000000001,M_GROUP_GOAL_SMOOTH[g]);
+  db=min(0,max(-96,10*log10(ratio)));
+  db;
+);
+
+// Layout, proportional to the available FX client area.
+ui_w=1480;ui_h=680;
+ui_s=max(0.01,min(gfx_w/ui_w,gfx_h/ui_h));
+ui_ox=(gfx_w-ui_w*ui_s)*0.5;
+ui_oy=(gfx_h-ui_h*ui_s)*0.5;
+ux=(mouse_x-ui_ox)/ui_s;
+uy=(mouse_y-ui_oy)/ui_s;
+
+// Input handling. REAPER forwards keystrokes to JSFX with want_all_kb.
+kb=gfx_getchar();
+while(kb>0) (
+  edit_active ? (
+    kb==13 ? finish_edit(1) :
+    kb==27 ? finish_edit(0) :
+    (kb==8 || kb=='del' || kb==127) ? (
+      edit_replace ? (strcpy(#edit_buf,"");edit_replace=0;) :
+      strlen(#edit_buf)>0 ? str_setchar(#edit_buf,strlen(#edit_buf)-1,0);
+    ) :
+    kb==1 ? edit_replace=1 :
+    ((kb>=48 && kb<=57) || kb==45 || kb==43 || kb==46 || kb==44) ? (
+      kb==44?kb=46;
+      edit_replace ? (strcpy(#edit_buf,"");edit_replace=0;);
+      strlen(#edit_buf)<13 ? str_setchar(#edit_buf,strlen(#edit_buf),kb);
+    );
+  );
+  kb=gfx_getchar();
+);
+
+// Fonts are rasterized at native output pixel size, not scaled bitmaps.
+gfx_setfont(1,"Arial",max(8,floor(12*ui_s+0.5)));
+gfx_setfont(2,"Arial",max(9,floor(12*ui_s+0.5)),'b');
+gfx_setfont(3,"Arial",max(11,floor(20*ui_s+0.5)),'b');
+gfx_setfont(4,"Arial",max(9,floor(14*ui_s+0.5)),'b');
+gfx_set(0.035,0.055,0.075); gfx_rect(0,0,gfx_w,gfx_h);
+gfx_set(0.065,0.098,0.13);rect(0,0,ui_w,47);
+gfx_set(0.15,0.66,0.88);rect(0,45,ui_w,2);
+gfx_setfont(3);gfx_set(0.93,0.96,1);text_at(16,10,"SPEECHSHARE  /  AUTOMIXER");
+gfx_setfont(1);gfx_set(0.58,0.72,0.80);text_at(854,18,"VIRTUAL GROUP KEYS  /  32 CHANNELS  /  SMART ENGINE");
+
+// Page selection; each page contains eight real microphones.
+ui_i=0;
+loop(4,
+  sprintf(#bank,"MIC  %02d - %02d",ui_i*8+1,ui_i*8+8);
+  solid_button(12+105*ui_i,56,99,29,#bank,page==ui_i,0.16,0.63,0.85);
+  ui_i+=1;
+);
+
+// Eight mic strips: gain left, weight right, groups, and MAN/AUTO/MUTE.
+ui_i=0;
+loop(8,
+  tdraw=page*8+ui_i;
+  xx=12+105*ui_i;
+  act=tdraw<mic_count;
+  grdraw=floor(M_GROUP[tdraw]);
+  gfx_set(0.105,0.137,0.177);rect(xx,94,99,576);
+  gfx_set(0.22,0.29,0.34);outline(xx,94,99,576);
+  gfx_setfont(4);gfx_set(act?0.87:0.40,act?0.93:0.49,act?0.97:0.55);
+  sprintf(#name,"MIC %02d",tdraw+1);text_center(xx+5,105,89,25,#name);
+  gfx_set(0.05,0.085,0.106);rect(xx+10,144,79,78);
+  im=0;
+  loop(7,
+    bd = slider11==0 ? M_DB_GAIN[tdraw] : slider11==1 ? M_DB_INPUT[tdraw]:M_DB_OUTPUT[tdraw];
+    f=min(1,max(0,(bd+72)/72));
+    gfx_set(0.18,0.24,0.30);rect(xx+14+im*10,153,6,58);
+    act ? (
+      gfx_set(f>0.82?0.94:0.24,f>0.82?0.70:0.89,0.40);
+      rect(xx+14+im*10,211-56*f+im*2.2,6,max(0,56*f-im*2.2));
+    );
+    im+=1;
+  );
+  gfx_setfont(1);gfx_set(0.60,0.77,0.86);text_center(xx+6,228,87,23,slider11==0?"GAIN / WEIGHT":slider11==1?"IN / WEIGHT":"OUT / WEIGHT");
+  solid_button(xx+19,256,61,22,"BYPASS",M_MODE[tdraw]==3,0.85,0.65,0.26);
+  bd=slider11==0?M_DB_GAIN[tdraw]:slider11==1?M_DB_INPUT[tdraw]:M_DB_OUTPUT[tdraw];
+  meter_v(xx+17,284,16,171,act?bd:-96,-60,0);
+  gfx_set(0.18,0.39,0.54);rect(xx+70,291,5,152);
+  fy=298+(24-slider(20+tdraw))/48*137;
+  gfx_set(0.95,0.98,1);rect(xx+57,fy-7,31,14);
+  gfx_set(0.26,0.38,0.47);rect(xx+61,fy-1,23,2);
+  gfx_setfont(1);gfx_set(0.60,0.78,0.86);text_center(xx+6,461,38,15,"GAIN");text_center(xx+53,461,41,15,"WEIGHT");
+  box_field(xx+24,478,52,27,slider(20+tdraw),20+tdraw,1);
+  grdraw==0?gfx_set(0.83,0.35,0.32):grdraw==1?gfx_set(0.27,0.77,0.48):gfx_set(0.37,0.58,0.99);
+  rect(xx+8,526,42,24);
+  sprintf(#gname,"GRP %c",65+grdraw);
+  gfx_set(0.03,0.08,0.10);text_center(xx+8,526,42,24,#gname);
+  solid_button(xx+53,526,39,24,"OVR",M_OVERRIDE[tdraw]>0.5,0.95,0.67,0.27);
+  solid_button(xx+11,579,77,22,"MAN",M_MODE[tdraw]==0,0.71,0.71,0.73);
+  solid_button(xx+11,606,77,22,"AUTO",M_MODE[tdraw]==1,0.28,0.84,0.43);
+  solid_button(xx+11,633,77,22,"MUTE",M_MODE[tdraw]==2,0.87,0.28,0.31);
+  ui_i+=1;
+);
+
+// Three virtual KEY strips. They NEVER appear at REAPER audio outputs.
+gui_g=0;
+loop(3,
+  xx=856+118*gui_g;
+  kid=key_level_id(gui_g);
+  kon=slider(58+gui_g)>0.5;
+  gfx_set(0.10,0.16,0.21);rect(xx,94,111,576);
+  gfx_set(0.28,0.39,0.47);outline(xx,94,111,576);
+  gui_g==0?gfx_set(0.95,0.45,0.36):gui_g==1?gfx_set(0.29,0.87,0.58):gfx_set(0.39,0.64,1);
+  rect(xx,94,111,5);
+  sprintf(#kname,"KEY  %c",65+gui_g);
+  gfx_setfont(4);gfx_set(0.94,0.96,1);text_center(xx+5,107,101,27,#kname);
+  gfx_setfont(1);gfx_set(0.58,0.76,0.84);text_center(xx+4,139,103,20,"VIRTUAL SOURCE");
+  gfx_set(0.04,0.075,0.10);rect(xx+12,175,87,124);
+  meter_v(xx+29,189,25,93,kon && slider9>0.5 ? M_KEY_DB[gui_g]:-96,-96,-24);
+  gfx_setfont(1);gfx_set(0.62,0.75,0.84);text_at(xx+63,200,"RMS");
+  sprintf(#dbshow,"%.0f",M_KEY_DB[gui_g]);gfx_set(0.94,0.96,0.99);text_at(xx+63,226,#dbshow);
+  gfx_setfont(1);gfx_set(0.53,0.67,0.75);text_at(xx+63,247,"dBFS");
+  gui_ktype=floor(slider(55+gui_g));
+  solid_button(xx+10,314,91,30,gui_ktype==0?"PINK NOISE":gui_ktype==1?"SINE 40 Hz":"SINE 1 kHz",1,0.19,0.48,0.67);
+  gfx_setfont(1);gfx_set(0.62,0.75,0.85);text_center(xx+5,354,101,20,"KEY LEVEL");
+  gfx_set(0.24,0.43,0.58);rect(xx+53,383,6,122);
+  fy=389+(-24-slider(kid))/72*109;
+  gfx_set(0.94,0.97,1);rect(xx+35,fy-7,42,14);
+  gfx_set(0.27,0.42,0.54);rect(xx+40,fy-1,32,2);
+  box_field(xx+26,520,59,26,slider(kid),kid,0);
+  solid_button(xx+12,561,87,29,kon?"KEY ON":"KEY OFF",kon,0.27,0.82,0.50);
+  gfx_setfont(1);gfx_set(0.62,0.75,0.84);text_center(xx+8,603,95,17,"REF CUT");
+  dbcut=ref_cut(gui_g);
+  (kon && slider9>0.5) ? (
+    M_GROUP_COUNT[gui_g]<=0 ? strcpy(#ct,"NO AUTO") :
+    (M_GROUP_OVERRIDE[gui_g]>0.5 || M_GROUP_MUTE[gui_g]>0.5) ?
+      strcpy(#ct,"INACTIVE") : sprintf(#ct,"%.1f dB",dbcut);
+  ) : strcpy(#ct,"OFF");
+  gfx_set(0.05,0.10,0.14);rect(xx+16,624,79,28);
+  gfx_set(0.91,0.96,1);gfx_setfont(2);
+  text_center(xx+16,624,79,28,#ct);
+  gui_g+=1;
+);
+
+// Master: 4 prominent tiles instead of decorative logo.
+xx=1218;
+gfx_set(0.09,0.13,0.17);rect(xx,94,250,576);
+gfx_set(0.25,0.33,0.40);outline(xx,94,250,576);
+gfx_setfont(4);gfx_set(0.88,0.96,1);text_at(xx+16,103,"MASTER CONTROLS");
+solid_button(xx+13,135,107,42,slider2>0.5?"ENGINE ON":"ENGINE OFF",slider2>0.5,0.28,0.86,0.45);
+solid_button(xx+130,135,107,42,slider9>0.5?"KEY ON":"KEY OFF",slider9>0.5,0.24,0.73,0.90);
+solid_button(xx+13,186,107,42,slider52>0.5?"SMART":"CLASSIC",slider52>0.5,0.43,0.66,0.94);
+solid_button(xx+130,186,107,42,slider11==0?"GAIN":slider11==1?"INPUT":"OUTPUT",1,0.19,0.49,0.65);
+gfx_setfont(1);gfx_set(0.62,0.76,0.86);text_at(xx+15,249,"GROUP       OVERRIDE             MUTE");
+gui_g=0;
+loop(3,
+  yy=274+gui_g*33;
+  sprintf(#gname,"%c",65+gui_g);
+  gui_g==0?gfx_set(0.94,0.46,0.36):gui_g==1?gfx_set(0.26,0.82,0.53):gfx_set(0.39,0.62,1);
+  rect(xx+13,yy,34,27);
+  gfx_set(0.04,0.08,0.11);text_center(xx+13,yy,34,27,#gname);
+  solid_button(xx+55,yy,91,27,"OVERRIDE",M_GROUP_OVERRIDE[gui_g]>0.5,0.87,0.64,0.26);
+  solid_button(xx+157,yy,79,27,"MUTE",M_GROUP_MUTE[gui_g]>0.5,0.87,0.29,0.35);
+  gui_g+=1;
+);
+gfx_set(0.24,0.35,0.43);rect(xx+12,387,226,1);
+gfx_set(0.93,0.96,1);gfx_setfont(4);text_at(xx+15,397,"ADVANCED DSP");
+ui_k=0;
+loop(6,
+  param_data(ui_k);
+  yy=426+ui_k*29;
+  gfx_set(0.69,0.83,0.88);gfx_setfont(1);text_at(xx+14,yy+8,#pname);
+  slider_h(xx+110,yy,64,24,slider(pi),pmin,pmax);
+  box_field(xx+179,yy,56,24,slider(pi),pi,ui_k==1?2:0);
+  ui_k+=1;
+);
+gfx_setfont(1);gfx_set(0.68,0.81,0.87);text_at(xx+16,611,"MICS");
+box_field(xx+58,606,39,26,slider12,12,0);
+solid_button(xx+101,606,26,26,"-",0,0,0,0);
+solid_button(xx+133,606,26,26,"+",0,0,0,0);
+solid_button(xx+165,606,71,26,slider1==0?"MULTI":slider1==1?"SUM":"BYPASS",1,0.24,0.60,0.79);
+gfx_setfont(1);gfx_set(0.53,0.69,0.78);text_at(xx+14,647,"KEYS: DETECTOR ONLY / NO AUDIO OUT");
+
+// Mouse events; every clickable element matches the rendered location.
+md=(mouse_cap&1)!=0;
+clicked=md && !was_down;
+dbl=clicked && (time_precise()-lastclicktime<0.29) && abs(ux-lastclickx)<6 && abs(uy-lastclicky)<6;
+clicked ? (
+  lastclicktime=time_precise();lastclickx=ux;lastclicky=uy;
+  drag_kind=0;
+  edit_active ? finish_edit(1);
+  ui_i=0;loop(4,hit(ux,uy,12+105*ui_i,56,99,29)?page=ui_i;ui_i+=1;);
+  hit(ux,uy,1231,135,107,42)?set_param(2,1-slider2,0,1,1);
+  hit(ux,uy,1348,135,107,42)?set_param(9,1-slider9,0,1,1);
+  hit(ux,uy,1231,186,107,42)?set_param(52,1-slider52,0,1,1);
+  hit(ux,uy,1348,186,107,42)?set_param(11,(slider11+1)%3,0,2,1);
+  gui_g=0;loop(3,
+    yy=274+gui_g*33;
+    hit(ux,uy,1273,yy,91,27)?(M_GROUP_OVERRIDE[gui_g]=1-M_GROUP_OVERRIDE[gui_g];sliderchange(-1););
+    hit(ux,uy,1375,yy,79,27)?(M_GROUP_MUTE[gui_g]=1-M_GROUP_MUTE[gui_g];sliderchange(-1););
+    gui_g+=1;
+  );
+  hit(ux,uy,1276,606,39,26)?do_edit(12,0);
+  hit(ux,uy,1319,606,26,26)?set_param(12,slider12-1,1,32,1);
+  hit(ux,uy,1351,606,26,26)?set_param(12,slider12+1,1,32,1);
+  hit(ux,uy,1383,606,71,26)?set_param(1,(slider1+1)%3,0,2,1);
+  ui_k=0;loop(6,
+    param_data(ui_k); yy=426+ui_k*29;
+    hit(ux,uy,1397,yy,56,24)?do_edit(pi,ui_k==1?2:0):
+    hit(ux,uy,1328,yy,64,24)?(
+      dbl ? set_param(pi,pdef,pmin,pmax,pstep) : (
+        drag_kind=2;drag_id=pi;drag_min=pmin;drag_max=pmax;drag_step=pstep;
+        drag_start=ux;drag_value=slider(pi);
+        !(mouse_cap&8)?set_param(pi,pmin+(ux-1335)/50*(pmax-pmin),pmin,pmax,pstep);
+      );
+    );ui_k+=1;
+  );
+  gui_g=0;loop(3,
+    xx=856+118*gui_g;kid=key_level_id(gui_g);
+    hit(ux,uy,xx+10,314,91,30)?set_param(55+gui_g,(slider(55+gui_g)+1)%3,0,2,1);
+    hit(ux,uy,xx+12,561,87,29)?set_param(58+gui_g,1-slider(58+gui_g),0,1,1);
+    hit(ux,uy,xx+26,520,59,26)?do_edit(kid,0):
+    hit(ux,uy,xx+30,378,52,136)?(
+      dbl ? set_param(kid,-56,-96,-24,1) : (
+        drag_kind=3;drag_group=gui_g;
+        set_param(kid,-24-(uy-389)/109*72,-96,-24,1);
+      );
+    );
+    gui_g+=1;
+  );
+  ui_i=0;loop(8,
+    tdraw=page*8+ui_i;xx=12+105*ui_i;
+    tdraw<mic_count ? (
+      hit(ux,uy,xx+19,256,61,22)?(M_MODE[tdraw]=(M_MODE[tdraw]==3?1:3);sliderchange(-1););
+      hit(ux,uy,xx+8,526,42,24)?(M_GROUP[tdraw]=(M_GROUP[tdraw]+1)%3;sliderchange(-1););
+      hit(ux,uy,xx+53,526,39,24)?(M_OVERRIDE[tdraw]=1-M_OVERRIDE[tdraw];sliderchange(-1););
+      hit(ux,uy,xx+11,579,77,22)?(M_MODE[tdraw]=0;sliderchange(-1););
+      hit(ux,uy,xx+11,606,77,22)?(M_MODE[tdraw]=1;sliderchange(-1););
+      hit(ux,uy,xx+11,633,77,22)?(M_MODE[tdraw]=2;sliderchange(-1););
+      hit(ux,uy,xx+24,478,52,27)?do_edit(20+tdraw,1):
+      hit(ux,uy,xx+51,285,43,169)?(
+        dbl?set_param(20+tdraw,0,-24,24,0.5):(
+          drag_kind=1;drag_track=tdraw;
+          set_param(20+tdraw,24-(uy-298)/137*48,-24,24,0.5);
+        );
+      );
+    );
+    ui_i+=1;
+  );
+);
+md && drag_kind==1 ? set_param(20+drag_track,24-(uy-298)/137*48,-24,24,0.5);
+md && drag_kind==3 ? (
+  kid=key_level_id(drag_group);
+  set_param(kid,-24-(uy-389)/109*72,-96,-24,1);
+);
+md && drag_kind==2 ? (
+  mouse_cap&8 ? (gui_v=drag_value+(ux-drag_start)*(drag_max-drag_min)/50*0.1;) :
+              (gui_v=drag_min+(ux-1335)/50*(drag_max-drag_min););
+  set_param(drag_id,gui_v,drag_min,drag_max,drag_step);
+);
+(!md && was_down)?drag_kind=0;
+was_down=md;
+mouse_wheel!=0 ? (
+  dir=mouse_wheel>0?1:-1;
+  ui_k=0;loop(6,
+    param_data(ui_k);yy=426+ui_k*29;
+    hit(ux,uy,1328,yy,125,24)?set_param(pi,slider(pi)+dir*pstep,pmin,pmax,pstep);
+    ui_k+=1;
+  );
+  gui_g=0;loop(3,
+    xx=856+118*gui_g;kid=key_level_id(gui_g);
+    hit(ux,uy,xx+25,379,65,168)?set_param(kid,slider(kid)+dir,-96,-24,1);
+    gui_g+=1;
+  );
+  ui_i=0;loop(8,
+    tdraw=page*8+ui_i;xx=12+105*ui_i;
+    tdraw<mic_count && hit(ux,uy,xx+22,284,73,221)?
+      set_param(20+tdraw,slider(20+tdraw)+dir*0.5,-24,24,0.5);
+    ui_i+=1;
+  );
+  mouse_wheel=0;
+);
