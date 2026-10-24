@@ -1,0 +1,119 @@
+name: Windows AutoBuild (Standalone + VST3)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/modular-4/**'
+      - 'plugins/insert-vst3/**'
+      - 'ci/**'
+      - '.github/workflows/windows-build.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'apps/modular-4/**'
+      - 'plugins/insert-vst3/**'
+      - 'ci/**'
+      - '.github/workflows/windows-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: speechshare-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: ${{ matrix.edition }} - Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 65
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [standalone-4, insert-vst3]
+
+    steps:
+      - name: Check out SpeechShare
+        uses: actions/checkout@v4
+
+      # JUCE is deliberately not committed into SpeechShare.
+      - name: Check out JUCE 8.0.15
+        uses: actions/checkout@v4
+        with:
+          repository: juce-framework/JUCE
+          ref: 8.0.15
+          path: _ci/JUCE
+          persist-credentials: false
+
+      - name: Configure CMake (Visual Studio 2022, x64)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $edition = '${{ matrix.edition }}'
+          $source = if ($edition -eq 'standalone-4') { 'apps/modular-4' } else { 'plugins/insert-vst3' }
+          $build = "build/windows-$edition"
+          $juce = Join-Path $env:GITHUB_WORKSPACE '_ci/JUCE'
+          $flags = if ($edition -eq 'standalone-4') {
+            @('-DSPEECHSHARE_LIVE_BUILD_APP=ON','-DSPEECHSHARE_LIVE_BUILD_TESTS=ON')
+          } else {
+            @('-DSPEECHSHARE_BUILD_PLUGINS=ON','-DSPEECHSHARE_BUILD_INSERT=ON','-DSPEECHSHARE_BUILD_TESTS=ON')
+          }
+          cmake -S $source -B $build -G 'Visual Studio 17 2022' -A x64 "-DJUCE_ROOT=$juce" @flags
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed: $LASTEXITCODE" }
+
+      - name: Compile application/plugin and all registered tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $edition = '${{ matrix.edition }}'
+          $build = "build/windows-$edition"
+          $targets = if ($edition -eq 'standalone-4') {
+            @(
+              'SpeechSharePHONModular',
+              'SpeechShareChannelFormatTests',
+              'SpeechShareModularPatchTests',
+              'SpeechShareFourSessionTests',
+              'SpeechShareSleepTests',
+              'SpeechSharePHONMappingTests',
+              'SpeechSharePatchTests',
+              'SpeechShareInsertEngineTests'
+            )
+          } else {
+            @(
+              'SpeechShareInsert_VST3',
+              'SpeechShareEngineTests',
+              'SpeechShareInsertTests',
+              'SpeechSharePresentationTests',
+              'SpeechShareSessionStressTests',
+              'SpeechSharePHONMappingTests'
+            )
+          }
+          cmake --build $build --config Release --parallel 2 --target @targets
+          if ($LASTEXITCODE -ne 0) { throw "MSVC build failed: $LASTEXITCODE" }
+
+      - name: Execute C++ tests
+        shell: pwsh
+        run: |
+          ctest --test-dir "build/windows-${{ matrix.edition }}" -C Release --output-on-failure
+          if ($LASTEXITCODE -ne 0) { throw "CTest failed: $LASTEXITCODE" }
+
+      - name: Package executable / complete VST3 bundle
+        shell: pwsh
+        run: |
+          & ./ci/package-windows.ps1 -Edition '${{ matrix.edition }}' -BuildDir 'build/windows-${{ matrix.edition }}' -DistDir 'dist'
+          if (-not $?) { throw 'Packaging failed' }
+
+      - name: Upload installable ZIP (no developer tools required)
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpeechShare-${{ matrix.edition }}-windows-x64
+          path: |
+            dist/SpeechShare-${{ matrix.edition }}-windows-x64.zip
+            dist/SpeechShare-${{ matrix.edition }}-windows-x64.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+# This workflow creates CI artifacts only, not public releases.
+# Passing tests does not prove ASIO/Dante realtime stability or licensing clearance.
